@@ -6,7 +6,7 @@ import ctypes
 
 # ================= 설정 값 =================
 JSON_KEYFILE = 'credentials.json'
-SHEET_NAME = 'maple chklist'
+SHEET_NAME = 'date chklist'
 FONT_NAME = "메이플스토리 Light"
 # ===========================================
 
