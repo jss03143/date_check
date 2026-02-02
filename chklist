@@ -1,0 +1,298 @@
+import tkinter as tk
+from tkinter import messagebox, ttk
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import ctypes
+
+# ================= 설정 값 =================
+JSON_KEYFILE = 'credentials.json'
+SHEET_NAME = 'maple chklist'
+FONT_NAME = "메이플스토리 Light"
+# ===========================================
+
+class MapleFinalApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("📊 일정 체크리스트")
+        
+        # 4K 환경을 고려한 기본 창 크기 설정
+        self.root.geometry("1850x1000")
+
+        # 창 종료(X) 버튼 클릭 시 실행될 프로토콜 연결
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+        self.check_vars = [] 
+        self.data = {}
+        self.cat_order = [] 
+        self.is_delete_mode = False 
+        self.is_edit_mode = False 
+
+        # 폰트 설정
+        self.large_font = (FONT_NAME, 15)
+        self.bold_font = (FONT_NAME, 15, "bold")
+        self.cat_font = (FONT_NAME, 12, "bold")
+        self.item_font = (FONT_NAME, 10)
+        self.small_font = (FONT_NAME, 9)
+
+        # 입력 글자 수 제한 검증
+        self.vcmd_cat = (self.root.register(lambda P: len(P) <= 10), '%P')
+        self.vcmd_task = (self.root.register(lambda P: len(P) <= 20), '%P')
+
+        self.setup_google_sheets()
+        self.refresh_data_from_sheet()
+        self.create_widgets()
+
+        # 창 크기 변경 시 UI 갱신 (지연 실행)
+        self._after_id = None
+        self.root.bind("<Configure>", self.on_window_resize)
+
+    def on_closing(self):
+        # 프로그램 종료 시 호출되어 데이터를 자동 저장함
+        try:
+            # 삭제/편집 모드가 아닐 때 안전하게 자동 저장 시도
+            if not self.is_delete_mode and not self.is_edit_mode:
+                self.sync_to_sheet(silent=True)
+        except:
+            pass
+        self.root.destroy()
+
+    def setup_google_sheets(self):
+        try:
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_KEYFILE, scope)
+            self.client = gspread.authorize(creds)
+            self.spreadsheet = self.client.open(SHEET_NAME)
+            
+            try:
+                self.sheet = self.spreadsheet.worksheet("시트1")
+            except gspread.exceptions.WorksheetNotFound:
+                # 'Main'이라는 이름의 탭이 없다면 에러 메시지 출력
+                messagebox.showerror("오류", "'Main' 워크시트를 찾을 수 없습니다.\n구글 시트의 탭 이름을 확인해주세요.")
+                self.root.destroy()
+                
+        except Exception as e:
+            messagebox.showerror("연결 오류", f"시트 연결 실패: {e}")
+            self.root.destroy()
+
+    def refresh_data_from_sheet(self):
+        try:
+            all_records = self.sheet.get_all_records()
+            self.data = {}
+            temp_cat_order = {}
+            for row in all_records:
+                main_cat = str(row.get('MainCategory', '기타'))
+                cycle = row.get('Cycle', '주간')
+                if cycle in ['weekly', '주간']: cycle = '주간'
+                else: cycle = '월간'
+                
+                order = row.get('Order', 999)
+                if main_cat not in self.data:
+                    self.data[main_cat] = {"주간": [], "월간": []}
+                    temp_cat_order[main_cat] = order
+                self.data[main_cat][cycle].append({
+                    "task": str(row.get('Task')), 
+                    "done": str(row.get('Done')).upper() == 'TRUE'
+                })
+            self.cat_order = sorted(temp_cat_order.keys(), key=lambda x: temp_cat_order[x])
+        except:
+            self.data, self.cat_order = {}, []
+
+    def create_widgets(self):
+        # 상단 입력부
+        input_frame = tk.LabelFrame(self.root, text="🆕 새 할 일 추가", padx=10, pady=10, font=self.cat_font)
+        input_frame.pack(fill="x", padx=20, pady=10)
+        
+        top_inner = tk.Frame(input_frame)
+        top_inner.pack(pady=5)
+
+        tk.Label(top_inner, text="📂 대주제:", font=self.large_font).grid(row=0, column=0, padx=5)
+        self.main_cat_entry = tk.Entry(top_inner, font=self.large_font, width=15, validate='key', validatecommand=self.vcmd_cat)
+        self.main_cat_entry.grid(row=0, column=1, padx=10)
+
+        tk.Label(top_inner, text="📝 할 일:", font=self.large_font).grid(row=0, column=2, padx=5)
+        self.task_entry = tk.Entry(top_inner, font=self.large_font, width=25, validate='key', validatecommand=self.vcmd_task)
+        self.task_entry.grid(row=0, column=3, padx=10)
+
+        self.cycle_combo = ttk.Combobox(top_inner, values=["주간", "월간"], state="readonly", font=self.large_font, width=8)
+        self.cycle_combo.current(0)
+        self.cycle_combo.grid(row=0, column=4, padx=5)
+
+        tk.Button(input_frame, text="추가하기", command=self.add_task, font=self.bold_font).pack(fill="x", pady=5)
+
+        # 제어 버튼
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(fill="x", padx=20, pady=5)
+        
+        tk.Button(btn_frame, text="💾 수동 저장", bg="#4CAF50", fg="white", font=self.bold_font, command=self.sync_to_sheet).pack(side="left", expand=True, fill="x", padx=2)
+        self.edit_btn = tk.Button(btn_frame, text="⚙️ 편집 모드 OFF", bg="#607D8B", fg="white", font=self.bold_font, command=self.toggle_edit_mode)
+        self.edit_btn.pack(side="left", expand=True, fill="x", padx=2)
+        self.mode_btn = tk.Button(btn_frame, text="🗑️ 삭제 모드 OFF", bg="#9E9E9E", fg="white", font=self.bold_font, command=self.toggle_delete_mode)
+        self.mode_btn.pack(side="left", expand=True, fill="x", padx=2)
+
+        # 스크롤 리스트 영역
+        self.outer_frame = tk.Frame(self.root)
+        self.outer_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        self.canvas = tk.Canvas(self.outer_frame, highlightthickness=0)
+        self.scroll_frame = tk.Frame(self.canvas)
+        self.scrollbar = tk.Scrollbar(self.outer_frame, orient="vertical", command=self.canvas.yview)
+        
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas_window = self.canvas.create_window((0,0), window=self.scroll_frame, anchor="nw")
+
+    def on_window_resize(self, event):
+        if event.widget == self.root:
+            if self._after_id: self.root.after_cancel(self._after_id)
+            self._after_id = self.root.after(100, self.refresh_ui)
+
+    def refresh_ui(self):
+        for widget in self.scroll_frame.winfo_children(): widget.destroy()
+        self.check_vars = []
+        bg_color = "white"
+        if self.is_delete_mode: bg_color = "#fff5f5"
+        elif self.is_edit_mode: bg_color = "#f0f7ff"
+        
+        self.scroll_frame.config(bg=bg_color)
+        self.canvas.config(bg=bg_color)
+
+        # 가로 8열 고정 설정
+        cols = 8
+        for i in range(cols):
+            self.scroll_frame.grid_columnconfigure(i, weight=1, uniform="fixed_eight")
+
+        for index, main_cat in enumerate(self.cat_order):
+            if main_cat not in self.data: continue
+            r, c = divmod(index, cols)
+            
+            card = tk.LabelFrame(self.scroll_frame, relief="groove", bd=1, bg=bg_color)
+            card.grid(row=r, column=c, padx=4, pady=8, sticky="nsew")
+            
+            title_bar = tk.Frame(card, bg=bg_color)
+            title_bar.pack(fill="x")
+            cat_label = tk.Label(title_bar, text=f"📂 {main_cat}", font=self.cat_font, bg=bg_color, cursor="hand2")
+            cat_label.pack(side="left", padx=5, pady=5)
+            cat_label.bind("<Button-1>", lambda e, c=main_cat: self.set_cat_from_click(c))
+
+            if self.is_edit_mode:
+                tk.Button(title_bar, text="▶", command=lambda i=index: self.move_category(i, 1), font=("Arial", 6), width=2).pack(side="right")
+                tk.Button(title_bar, text="◀", command=lambda i=index: self.move_category(i, -1), font=("Arial", 6), width=2).pack(side="right")
+            
+            for cycle in ["주간", "월간"]:
+                tasks = self.data[main_cat][cycle]
+                if tasks:
+                    tk.Label(card, text=f"• {cycle}", fg="#666666", bg=bg_color, font=self.small_font).pack(anchor="w", padx=5)
+                    for i, item in enumerate(tasks):
+                        item_frame = tk.Frame(card, bg=bg_color)
+                        item_frame.pack(fill="x", padx=5)
+                        
+                        var = tk.BooleanVar(value=False if self.is_delete_mode else item["done"])
+                        self.check_vars.append((main_cat, cycle, i, var))
+                        
+                        cb = tk.Checkbutton(item_frame, text=item["task"], variable=var, bg=bg_color,
+                                            font=self.item_font, wraplength=170, justify="left")
+                        cb.pack(side="left", anchor="w")
+
+                        if self.is_edit_mode:
+                            btn_f = tk.Frame(item_frame, bg=bg_color)
+                            btn_f.pack(side="right")
+                            tk.Button(btn_f, text="▲", command=lambda m=main_cat, cy=cycle, idx=i: self.move_task(m, cy, idx, -1), font=("Arial", 6), width=1).pack()
+                            tk.Button(btn_f, text="▼", command=lambda m=main_cat, cy=cycle, idx=i: self.move_task(m, cy, idx, 1), font=("Arial", 6), width=1).pack()
+
+        # 하단 여백용 스페이서
+        footer_spacer = tk.Frame(self.scroll_frame, height=100, bg=bg_color)
+        footer_spacer.grid(row=(len(self.cat_order)//cols) + 1, column=0, columnspan=cols)
+
+        self.scroll_frame.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def set_cat_from_click(self, cat_name):
+        self.main_cat_entry.delete(0, tk.END)
+        self.main_cat_entry.insert(0, cat_name)
+        self.task_entry.focus_set()
+
+    def sync_to_sheet(self, silent=False):
+        # 현재 UI의 상태를 캡처하여 구글 시트에 업데이트
+        if not self.is_delete_mode:
+            for m_cat, cycle, idx, var in self.check_vars:
+                if m_cat in self.data and idx < len(self.data[m_cat][cycle]):
+                    self.data[m_cat][cycle][idx]["done"] = var.get()
+
+        rows = [["MainCategory", "Cycle", "Task", "Done", "Order"]]
+        for order_idx, m_cat in enumerate(self.cat_order):
+            if m_cat in self.data:
+                for cycle in ["주간", "월간"]:
+                    for item in self.data[m_cat][cycle]:
+                        rows.append([m_cat, cycle, item["task"], item["done"], order_idx])
+        try:
+            self.sheet.batch_clear(["A:E"])
+            self.sheet.update('A1', rows)
+            if not silent: messagebox.showinfo("완료", "구글 시트 저장 성공!")
+        except:
+            if not silent: messagebox.showerror("오류", "시트 저장 중 오류 발생")
+
+    def toggle_edit_mode(self):
+        self.is_edit_mode = not self.is_edit_mode
+        self.is_delete_mode = False
+        self.edit_btn.config(text="✨ 편집 모드 ON" if self.is_edit_mode else "⚙️ 편집 모드 OFF", bg="#2196F3" if self.is_edit_mode else "#607D8B")
+        self.mode_btn.config(text="🗑️ 삭제 모드 OFF", bg="#9E9E9E")
+        self.refresh_ui()
+
+    def toggle_delete_mode(self):
+        self.is_delete_mode = not self.is_delete_mode
+        self.is_edit_mode = False
+        if self.is_delete_mode:
+            self.mode_btn.config(text="🔥 선택 항목 삭제 실행", bg="#f44336")
+        else:
+            self.execute_delete_checked()
+            self.mode_btn.config(text="🗑️ 삭제 모드 OFF", bg="#9E9E9E")
+        self.refresh_ui()
+
+    def execute_delete_checked(self):
+        to_delete = [item for item in self.check_vars if item[3].get()]
+        if not to_delete: return
+        if messagebox.askyesno("삭제 확인", f"{len(to_delete)}개 항목을 영구 삭제하시겠습니까?"):
+            for m_cat, cycle, idx, var in sorted(to_delete, key=lambda x: x[2], reverse=True):
+                if m_cat in self.data: del self.data[m_cat][cycle][idx]
+            for cat in list(self.data.keys()):
+                if not any(self.data[cat].values()):
+                    del self.data[cat]
+                    if cat in self.cat_order: self.cat_order.remove(cat)
+            self.sync_to_sheet(silent=True)
+            self.refresh_ui()
+
+    def add_task(self):
+        m_cat, task, cycle = self.main_cat_entry.get().strip(), self.task_entry.get().strip(), self.cycle_combo.get()
+        if m_cat and task:
+            if m_cat not in self.data:
+                self.data[m_cat] = {"주간": [], "월간": []}
+                self.cat_order.append(m_cat)
+            self.data[m_cat][cycle].append({"task": task, "done": False})
+            self.task_entry.delete(0, tk.END)
+            self.refresh_ui()
+
+    def move_category(self, index, direction):
+        new_index = index + direction
+        if 0 <= new_index < len(self.cat_order):
+            self.cat_order[index], self.cat_order[new_index] = self.cat_order[new_index], self.cat_order[index]
+            self.refresh_ui()
+
+    def move_task(self, cat, cycle, index, direction):
+        tasks = self.data[cat][cycle]
+        new_index = index + direction
+        if 0 <= new_index < len(tasks):
+            tasks[index], tasks[new_index] = tasks[new_index], tasks[index]
+            self.refresh_ui()
+
+if __name__ == "__main__":
+    # 고해상도(DPI) 최적화 설정
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except:
+        try: ctypes.windll.user32.SetProcessDPIAware()
+        except: pass
+
+    root = tk.Tk()
+    app = MapleFinalApp(root)
+    root.mainloop()
